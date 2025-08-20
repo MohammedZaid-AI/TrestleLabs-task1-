@@ -1,5 +1,9 @@
 streamlit
 python-dotenv
 langchain-google-genai
-python-doctr[tf]
+google-generativeai
+easyocr
+pdf2image
+Pillow
+opencv-python-headless
 pyperclip

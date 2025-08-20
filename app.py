@@ -6,9 +6,9 @@ import re
 import time
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
-from doctr.io import DocumentFile
-from doctr.models import ocr_predictor
 from datetime import datetime
+import easyocr
+import fitz  # PyMuPDF for PDF to image conversion
 
 # ✅ Load environment variables
 load_dotenv()
@@ -20,22 +20,29 @@ llm = ChatGoogleGenerativeAI(
     temperature=0.2
 )
 
-# ✅ Initialize docTR OCR model once
-ocr_model = ocr_predictor(pretrained=True)
+# ✅ Initialize EasyOCR model once
+reader = easyocr.Reader(['en'])  # you can add multiple languages e.g., ['en', 'hi']
+
 
 # ✅ Streamlit page setup
 st.set_page_config(page_title="Doc AI Agent", layout="wide")
 st.title("📄 Document AI Agent")
 
 
-# --- OCR with docTR ---
-def run_doctr_ocr(file_bytes, file_type="image"):
+# --- OCR with EasyOCR ---
+def run_easyocr(file_bytes, file_type="image"):
     if file_type == "pdf":
-        doc = DocumentFile.from_pdf(file_bytes)
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        text = ""
+        for page_num in range(len(doc)):
+            pix = doc[page_num].get_pixmap()
+            img_bytes = pix.tobytes("png")
+            result = reader.readtext(img_bytes, detail=0, paragraph=True)
+            text += "\n".join(result) + "\n"
+        return text
     else:
-        doc = DocumentFile.from_images([file_bytes])
-    result = ocr_model(doc)
-    return result.render()
+        result = reader.readtext(file_bytes, detail=0, paragraph=True)
+        return "\n".join(result)
 
 
 # --- Doc Type Detection (LLM-based) ---
@@ -107,10 +114,6 @@ SCHEMAS = {
         "key_points": "list of strings"
     }
 }
-
-# ✅ Currency Symbol to Code Mapping
-
-
 
 
 # --- JSON Extraction with Retry + Confidence ---
@@ -200,7 +203,6 @@ def validate_fields(result: dict):
 
         if "currency" in field.lower():
             valid_currencies = ["USD", "INR", "EUR", "GBP", "JPY", "CAD", "AUD","$","₹","€","£","¥"]
-
             if val.upper() not in valid_currencies:
                 issues.append(f"⚠️ {field} is not a valid currency code: {val}")
     return issues
@@ -212,10 +214,10 @@ uploaded_file = st.file_uploader("Upload PDF or Image", type=["pdf", "png", "jpg
 if uploaded_file:
     if uploaded_file.type == "application/pdf":
         st.info("Processing PDF ")
-        text = run_doctr_ocr(uploaded_file.read(), file_type="pdf")
+        text = run_easyocr(uploaded_file.read(), file_type="pdf")
     else:
         st.info("Processing Image ")
-        text = run_doctr_ocr(uploaded_file.read(), file_type="image")
+        text = run_easyocr(uploaded_file.read(), file_type="image")
 
     st.subheader("📜 Extracted Text")
     st.text_area("OCR Output", text, height=200)
