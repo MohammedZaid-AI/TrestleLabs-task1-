@@ -1,24 +1,20 @@
-Document AI Agent
+📄 Document AI Agent
 
-An AI-powered Document Intelligence app that can extract structured JSON from PDFs, images, and handwritten documents with confidence scoring, validation, and clean UI.
+An AI-powered Document Intelligence app that extracts structured JSON from PDFs, images, and handwritten documents with confidence scoring, validation, and a clean UI.
 
-Supports multiple document types:
+📂 Supported Document Types
 
 🧾 Invoices
-
 🧾 Receipts
-
 💊 Prescriptions
-
 👨‍💼 Resumes
-
 📄 General documents
 
 ⚡ Features
 
-OCR with docTR → Handles PDFs, images, even handwritten text.
+OCR with EasyOCR → Handles PDFs, images, and handwritten text.
 
-Document type detection (LLM-based) → Auto-classifies docs into invoice, receipt, prescription, resume, or general.
+Document Type Detection (LLM-based) → Auto-classifies docs into invoice, receipt, prescription, resume, or general.
 
 Structured JSON Extraction → Converts messy text into clean JSON aligned with schemas.
 
@@ -44,47 +40,53 @@ Custom Schema Support → Paste your own schema to guide extraction.
 
 Python 3.9+
 
-Streamlit
- – Web UI
+Streamlit – Web UI
 
-docTR
- – OCR
+EasyOCR + PyMuPDF (fitz) – OCR for images & PDFs
 
-LangChain
- + Google Gemini API
- – LLM extraction
+LangChain + Google Gemini API – LLM-powered extraction
 
-Pyperclip
- – Copy JSON
+Pyperclip – Copy JSON to clipboard
 
 Regex + Python built-ins – Validation
 
 🚀 Setup & Run
-1. Clone repo
+
+Clone repo
+
 git clone https://github.com/MohammedZaid-AI/TrestleLabs-task1-.git
 cd document-ai-agent
 
-2. Create virtual environment
+
+Create virtual environment
+
 python -m venv venv
 source venv/bin/activate   # Mac/Linux
 venv\Scripts\activate      # Windows
 
-3. Install dependencies
+
+Install dependencies
+
 pip install -r requirements.txt
 
-4. Environment variables
 
-Create a .env file:
+Set environment variables
+Create a .env file with:
 
 GOOGLE_API_KEY=your_google_api_key
 
-5. Run app
+
+Run the app
+
 streamlit run app.py
 
 📊 Example Output
-Input – Receipt (handwritten)
+
+Input – Handwritten Receipt
 <img src="examples/handwritten_receipt.jpg" width="400"/>
+
 Output – Extracted JSON
+
 {
   "store_name": {"value": "Bright Caterers", "confidence": 0.60},
   "date": {"value": "2016-07-01", "confidence": 0.50},
@@ -94,7 +96,7 @@ Output – Extracted JSON
 
 🧩 Solution Approach
 
-OCR (docTR) extracts raw text from PDFs/images.
+OCR (EasyOCR + PyMuPDF) extracts raw text from PDFs/images.
 
 LLM (Gemini via LangChain) classifies the document type.
 
@@ -102,21 +104,21 @@ Schema-guided extraction → prompts LLM to return JSON with value + confidence.
 
 Validation ensures extracted fields make sense (dates, numerics, emails, currency).
 
-Confidence Scoring highlights reliability of extracted fields.
+Confidence scoring highlights reliability of extracted fields.
 
 UI (Streamlit) presents results with confidence bars, warnings, and JSON export.
 
 📉 Limitations & Trade-offs
 
-Handwritten documents → OCR works, but confidence often drops (depends on handwriting clarity).
+Handwritten text → EasyOCR works but confidence drops on messy handwriting.
 
-Domain-specific fields → Schema may need extension (e.g., medical prescriptions with dosage/timing).
+Domain-specific fields → Schema may need extensions (e.g., prescription dosage/timing).
 
 LLM cost/latency → Dependent on API usage and document size.
 
-Currency codes → Normalization needed (e.g., $ → USD).
+Currency codes → Still need normalization ($ → USD).
 
-Dates → Ambiguous date formats may cause mis-validation.
+Dates → Ambiguous formats may cause validation issues.
 
 📅 Evaluation Criteria Mapping
 
@@ -127,5 +129,4 @@ Dates → Ambiguous date formats may cause mis-validation.
 ✔️ UI/UX (10%) → Clean JSON viewer, confidence bars, download/copy.
 ✔️ Documentation (5%) → README with setup, examples, limitations.
 
-
-Example test files are provided in the samples/ folder for quick evaluation (digital invoices, handwritten receipts, and resumes).
+📂 Example test files are provided in the samples/ folder for quick evaluation (digital invoices, handwritten receipts, and resumes).
