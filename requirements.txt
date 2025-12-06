@@ -2,8 +2,9 @@ streamlit
 python-dotenv
 langchain-google-genai
 google-generativeai
-PyMuPDF
-pytesseract
-pillow
+easyocr
+pdf2image
+Pillow
+opencv-python-headless
 pyperclip
-transformers
+PyMuPDF
