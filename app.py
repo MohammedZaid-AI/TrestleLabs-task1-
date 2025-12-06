@@ -7,50 +7,113 @@ import time
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from datetime import datetime
-import easyocr
-import fitz  # PyMuPDF for PDF to image conversion
 
-# ✅ Load environment variables
+import pytesseract
+from PIL import Image
+import fitz  # PyMuPDF PDF parsing
+import io
+import shutil
+
+
+# ============================================================
+# 0️⃣ LOAD ENVIRONMENT VARIABLES
+# ============================================================
 load_dotenv()
 os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
-# ✅ Initialize Gemini LLM (LangChain wrapper)
+
+# ============================================================
+# 1️⃣ SETUP GEMINI LLM
+# ============================================================
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-pro",
+    model="gemini-2.0-flash",
     temperature=0.2
 )
 
-# ✅ Initialize EasyOCR model once
-reader = easyocr.Reader(['en'])  # you can add multiple languages e.g., ['en', 'hi']
+
+# ============================================================
+# 2️⃣ TESSERACT CONFIGURATION (Windows + Linux)
+# ============================================================
+
+def configure_tesseract():
+    """
+    Handles OCR path setup for:
+    - Windows (your correct installed path)
+    - Linux / HuggingFace Spaces (auto-detect)
+    """
+
+    if os.name == "nt":
+        # Windows — using your detected correct install paths
+        tesseract_exe = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        tessdata_dir = r"C:\Program Files\Tesseract-OCR\tessdata"
+
+        if not os.path.exists(tesseract_exe):
+            raise FileNotFoundError("❌ Tesseract not found at expected Windows location.")
+
+        if not os.path.exists(os.path.join(tessdata_dir, "eng.traineddata")):
+            raise FileNotFoundError("❌ Missing eng.traineddata in tessdata folder.")
+
+        pytesseract.pytesseract.tesseract_cmd = tesseract_exe
+        os.environ["TESSDATA_PREFIX"] = tessdata_dir
+
+        print("✔ Windows Tesseract configured:", tesseract_exe)
+        print("✔ Using tessdata:", tessdata_dir)
+
+    else:
+        # Linux / HuggingFace Spaces
+        linux_path = shutil.which("tesseract")
+        if linux_path:
+            pytesseract.pytesseract.tesseract_cmd = linux_path
+            # Standard HF tessdata location
+            os.environ["TESSDATA_PREFIX"] = "/usr/share/tesseract-ocr/4.00/tessdata"
+            print("✔ Linux Tesseract configured:", linux_path)
+        else:
+            raise FileNotFoundError("❌ Tesseract not found on this Linux environment.")
 
 
-# ✅ Streamlit page setup
-st.set_page_config(page_title="Doc AI Agent", layout="wide")
-st.title("📄 Document AI Agent")
+# Run configuration
+configure_tesseract()
 
 
-# --- OCR with EasyOCR ---
-def run_easyocr(file_bytes, file_type="image"):
+# ============================================================
+# 3️⃣ OCR ENGINE — TESSERACT
+# ============================================================
+
+def run_tesseract(file_bytes, file_type="image"):
+    """
+    Extract text using Tesseract OCR.
+    Handles both PDF and Image files.
+    """
+
+    text_out = ""
+
+    # PDF case
     if file_type == "pdf":
         doc = fitz.open(stream=file_bytes, filetype="pdf")
-        text = ""
-        for page_num in range(len(doc)):
-            pix = doc[page_num].get_pixmap()
+        for page in doc:
+            pix = page.get_pixmap()
             img_bytes = pix.tobytes("png")
-            result = reader.readtext(img_bytes, detail=0, paragraph=True)
-            text += "\n".join(result) + "\n"
-        return text
-    else:
-        result = reader.readtext(file_bytes, detail=0, paragraph=True)
-        return "\n".join(result)
+            img = Image.open(io.BytesIO(img_bytes))
+
+            extracted = pytesseract.image_to_string(img)
+            text_out += extracted + "\n"
+
+        return text_out.strip()
+
+    # Image case
+    img = Image.open(io.BytesIO(file_bytes))
+    extracted = pytesseract.image_to_string(img)
+
+    return extracted.strip()
 
 
-# --- Doc Type Detection (LLM-based) ---
+# ============================================================
+# 4️⃣ DOCUMENT CLASSIFICATION (LLM)
+# ============================================================
+
 def detect_doc_type_llm(text: str) -> str:
-    """Classify into invoice, receipt, prescription, resume, general"""
     prompt = f"""
-    You are a document classifier.
-    Classify the following text into one of these categories:
+    Classify this document into one category:
     - invoice
     - receipt
     - prescription
@@ -60,25 +123,24 @@ def detect_doc_type_llm(text: str) -> str:
     Document text:
     {text[:1500]}
     """
+
     try:
         response = llm.invoke(prompt)
-        category = response.content.strip().lower()
-        if "invoice" in category:
-            return "invoice"
-        elif "receipt" in category:
-            return "receipt"
-        elif "prescription" in category:
-            return "prescription"
-        elif "resume" in category:
-            return "resume"
-        else:
-            return "general"
-    except Exception as e:
-        st.error(f"Doc type detection failed: {e}")
+        label = response.content.strip().lower()
+
+        for t in ["invoice", "receipt", "prescription", "resume"]:
+            if t in label:
+                return t
+        return "general"
+
+    except:
         return "general"
 
 
-# --- Schema per document type ---
+# ============================================================
+# 5️⃣ SCHEMAS FOR EXTRACTION
+# ============================================================
+
 SCHEMAS = {
     "invoice": {
         "invoice_number": "string",
@@ -86,7 +148,6 @@ SCHEMAS = {
         "total_amount": "float",
         "currency": "string",
         "vendor_name": "string"
-
     },
     "prescription": {
         "patient_name": "string",
@@ -116,179 +177,170 @@ SCHEMAS = {
 }
 
 
-# --- JSON Extraction with Retry + Confidence ---
-def extract_json_with_confidence(text, schema=None, retries=2, self_consistency=False, runs=3):
-    schema_hint = f"""
-    Schema (fields must follow this structure):
-    {json.dumps(schema, indent=2) if schema else "sensible key-value pairs"}
+# ============================================================
+# 6️⃣ JSON EXTRACTION (LLM + CONFIDENCE)
+# ============================================================
 
-    - If a field is a list of objects (e.g., projects), output it as an array of JSON objects.
-    - For each field, return both 'value' and 'confidence' (0.0–1.0).
-    """
+def extract_json_with_confidence(text, schema, retries=2, self_consistency=False, runs=3):
+
+    schema_hint = json.dumps(schema, indent=2)
 
     prompt = f"""
-    You are an AI that extracts structured data from documents.
-    Document text:
+    Extract structured JSON from the document:
+
+    Document:
     {text}
 
+    Schema:
     {schema_hint}
 
-    Output ONLY valid JSON in this format:
+    Return ONLY valid JSON.
+    Each field must be:
     {{
-        "field_name": {{"value": "...", "confidence": 0.92}},
-        "field_name2": {{"value": "...", "confidence": 0.75}}
+        "value": "...",
+        "confidence": 0.0–1.0
     }}
     """
 
     def run_once(p):
         for attempt in range(retries):
             response = llm.invoke(p)
-            raw_output = response.content.strip()
-            cleaned_output = re.sub(r"^```(?:json)?|```$", "", raw_output, flags=re.MULTILINE).strip()
-            try:
-                return json.loads(cleaned_output)
-            except Exception:
-                if attempt == retries - 1:
-                    return {"raw_output": raw_output, "error": "Invalid JSON"}
-                p += "\n\n⚠️ Reminder: Output must be pure JSON, no text or markdown."
+            raw = response.content.strip()
 
-    # If self-consistency enabled, run multiple times
+            cleaned = re.sub(r"^```(json)?|```$", "", raw, flags=re.MULTILINE).strip()
+
+            try:
+                return json.loads(cleaned)
+            except:
+                if attempt == retries - 1:
+                    return {"error": "Invalid JSON", "raw_output": raw}
+
+                p += "\nREMINDER: Output MUST be valid JSON only."
+
     if self_consistency:
         outputs = [run_once(prompt) for _ in range(runs)]
-        valid = [o for o in outputs if isinstance(o, dict) and "error" not in o]
+        valid = [o for o in outputs if "error" not in o]
+
         if not valid:
-            return outputs[-1]  # fallback
-        # merge confidences by averaging
+            return outputs[-1]
+
         merged = {}
         for o in valid:
-            for field, data in o.items():
+            for field, d in o.items():
                 if field not in merged:
-                    merged[field] = {"value": data.get("value", ""), "confidence": data.get("confidence", 0)}
+                    merged[field] = {"value": d["value"], "confidence": d["confidence"]}
                 else:
-                    merged[field]["confidence"] = (merged[field]["confidence"] + data.get("confidence", 0)) / 2
+                    merged[field]["confidence"] = (merged[field]["confidence"] + d["confidence"]) / 2
+
         return merged
-    else:
-        return run_once(prompt)
+
+    return run_once(prompt)
 
 
-# --- Validation ---
-def validate_fields(result: dict):
-    """Check for valid dates, numbers, emails, phones, and currency codes."""
+# ============================================================
+# 7️⃣ FIELD VALIDATION ENGINE
+# ============================================================
+
+def validate_fields(result):
     issues = []
-    for field, data in result.items():
-        if not isinstance(data, dict) or "value" not in data:
-            continue
-        val = str(data["value"]).strip()
 
+    for field, data in result.items():
+        if not isinstance(data, dict):
+            continue
+
+        val = str(data.get("value", "")).strip()
+
+        # Date validation
         if "date" in field.lower():
             try:
                 datetime.fromisoformat(val)
-            except Exception:
+            except:
                 if not re.match(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}", val):
-                    issues.append(f"⚠️ {field} has invalid date: {val}")
+                    issues.append(f"⚠️ Invalid date: {field} → {val}")
 
-        if any(x in field.lower() for x in ["amount", "total", "price", "qty", "quantity"]):
+        # Numeric fields
+        if any(x in field.lower() for x in ["amount", "total", "price"]):
             try:
                 float(val.replace(",", "").replace("$", "").replace("₹", ""))
-            except Exception:
-                issues.append(f"⚠️ {field} is not numeric: {val}")
+            except:
+                issues.append(f"⚠️ Invalid number: {field} → {val}")
 
+        # Email
         if "email" in field.lower():
             if not re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", val):
-                issues.append(f"⚠️ {field} is not a valid email: {val}")
+                issues.append(f"⚠️ Invalid email format → {val}")
 
-        if "phone" in field.lower() or "contact" in field.lower():
-            if not re.match(r"^\+?\d{7,15}$", val.replace(" ", "").replace("-", "")):
-                issues.append(f"⚠️ {field} is not a valid phone number: {val}")
-
-        if "currency" in field.lower():
-            valid_currencies = ["USD", "INR", "EUR", "GBP", "JPY", "CAD", "AUD","$","₹","€","£","¥"]
-            if val.upper() not in valid_currencies:
-                issues.append(f"⚠️ {field} is not a valid currency code: {val}")
     return issues
 
 
-# --- File Upload ---
+# ============================================================
+# 8️⃣ STREAMLIT UI
+# ============================================================
+
+st.set_page_config(page_title="Doc AI Agent", layout="wide")
+st.title("📄 Document AI Agent (Tesseract OCR + Gemini JSON Extractor)")
+
+
 uploaded_file = st.file_uploader("Upload PDF or Image", type=["pdf", "png", "jpg", "jpeg"])
 
 if uploaded_file:
+
+    # OCR processing
     if uploaded_file.type == "application/pdf":
-        st.info("Processing PDF ")
-        text = run_easyocr(uploaded_file.read(), file_type="pdf")
+        st.info("📄 Running OCR on PDF using Tesseract…")
+        text = run_tesseract(uploaded_file.read(), "pdf")
     else:
-        st.info("Processing Image ")
-        text = run_easyocr(uploaded_file.read(), file_type="image")
+        st.info("🖼️ Running OCR on Image using Tesseract…")
+        text = run_tesseract(uploaded_file.read(), "image")
 
-    st.subheader("📜 Extracted Text")
-    st.text_area("OCR Output", text, height=200)
+    st.subheader("📜 OCR Extracted Text")
+    st.text_area("Extracted Text", text, height=250)
 
+    # Document type
     doc_type = detect_doc_type_llm(text)
-    st.write(f"📂 Detected Document Type: **{doc_type.capitalize()}**")
+    st.write(f"📂 Detected Type: **{doc_type}**")
 
-    st.subheader("📝 Schema Selection")
-    use_custom_schema = st.checkbox("Use custom schema?")
-    if use_custom_schema:
-        schema_input = st.text_area("Paste your custom schema (JSON)", height=200, value=json.dumps(SCHEMAS[doc_type], indent=2))
+    # Schema selection
+    st.subheader("📑 Schema Settings")
+    custom = st.checkbox("Use Custom Schema")
+
+    if custom:
+        schema_text = st.text_area("Custom Schema", json.dumps(SCHEMAS[doc_type], indent=2), height=200)
         try:
-            custom_schema = json.loads(schema_input)
-        except Exception:
-            st.error("⚠️ Invalid JSON schema! Falling back to auto-detected schema.")
-            custom_schema = SCHEMAS[doc_type]
+            schema = json.loads(schema_text)
+        except:
+            st.error("Invalid JSON schema! Using default.")
+            schema = SCHEMAS[doc_type]
     else:
-        custom_schema = SCHEMAS[doc_type]
+        schema = SCHEMAS[doc_type]
 
-    self_consistency = st.checkbox("Enable Self-consistency (runs 3x)")
+    sc = st.checkbox("Enable Self-Consistency (3 runs)")
 
-    if st.button("🔍 Extract JSON + Confidence"):
-        start_time = time.time()
-        result = extract_json_with_confidence(text, schema=custom_schema, self_consistency=self_consistency)
-        elapsed = time.time() - start_time
+    if st.button("🔍 Extract JSON"):
+        start = time.time()
 
-        st.subheader("🗂️ Extracted JSON with Confidence")
+        result = extract_json_with_confidence(text, schema, self_consistency=sc)
+
+        st.subheader("🗂️ Extracted JSON")
         st.json(result)
 
-        if isinstance(result, dict) and "error" not in result:
-            st.subheader("📊 Confidence per Field")
-            confidences = []
-            for field, data in result.items():
-                if isinstance(data, dict) and "confidence" in data:
-                    conf = float(data["confidence"])
-                    val = data["value"]
-                    confidences.append(conf)
-                    if conf < 0.6:
-                        st.error(f"{field}: {val} (Low Confidence {conf:.2f})")
-                    else:
-                        st.write(f"**{field}**: {val} ({conf:.2f})")
-                    st.progress(conf)
+        # Validation
+        issues = validate_fields(result)
+        if issues:
+            st.warning("⚠️ Validation issues found:")
+            for i in issues:
+                st.write(i)
+        else:
+            st.success("✔ All fields validated successfully")
 
-            if confidences:
-                overall = sum(confidences) / len(confidences)
-                st.info(f"📈 Overall Confidence Score: {overall:.2f}")
+        # Download JSON
+        json_str = json.dumps(result, indent=2)
+        st.download_button("💾 Download JSON", json_str, file_name=f"{doc_type}_data.json")
 
-            issues = validate_fields(result)
-            if issues:
-                st.warning("⚠️ Validation Issues Found:")
-                for issue in issues:
-                    st.write(issue)
-            else:
-                st.success("✅ All fields passed validation")
+        st.text_area("Final JSON", json_str, height=200)
 
-            st.download_button(
-                label="💾 Download JSON",
-                data=json.dumps(result, indent=2),
-                file_name=f"{doc_type}_extracted.json",
-                mime="application/json"
-            )
+        if st.button("📋 Copy JSON"):
+            pyperclip.copy(json_str)
+            st.success("Copied to clipboard!")
 
-            json_str = json.dumps(result, indent=2)
-            st.text_area("📜 Extracted JSON", json_str, height=200)
-
-            if st.button("📋 Copy JSON to Clipboard"):
-                pyperclip.copy(json_str)
-                st.success("✅ JSON copied to clipboard!")
-
-            if st.button("🔄 Retry Extraction"):
-                st.warning("Retrying extraction...")
-                st.experimental_rerun()
-
-        st.caption(f"⏱️ Processed in {elapsed:.2f} seconds")
+        st.caption(f"⏱️ Completed in {time.time() - start:.2f} seconds")
